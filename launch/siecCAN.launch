@@ -4,4 +4,6 @@
   
   <node type="listener.py" pkg="siecCAN_rospack" name="CAN_listener"/>
   
+  <node type="odometry.py" pkg="siecCAN_rospack" name="odometry"/>
+  
 </launch>

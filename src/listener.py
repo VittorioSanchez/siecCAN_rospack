@@ -39,6 +39,13 @@ from std_msgs.msg import String
 from geometry_msgs.msg import Twist 
 from std_msgs.msg import Float32MultiArray
 from std_msgs.msg import MultiArrayDimension
+from sensor_msgs.msg import Imu
+from sensor_msgs.msg import NavSatFix
+from sensor_msgs.msg import NavSatStatus
+from sensor_msgs.msg import MagneticField
+from geometry_msgs.msg import Vector3
+from geometry_msgs.msg import Quaternion
+
 
 from threading import Thread, Lock
 import time
@@ -48,6 +55,8 @@ import struct
 import codecs
 from ctypes import *
 
+VALPI = 3.142
+VALG = 9.807
 
 CMC = 0x010
 MS = 0x100
@@ -55,6 +64,12 @@ US1 = 0x000
 US2 = 0x001
 OM1 = 0x101
 OM2 = 0x102
+GPS_ID = 0x201
+IMU_ACCELXY = 0x202
+IMU_MAGNETOXY = 0x203
+IMU_ROTATIONXY = 0x204
+IMU_ACCELMAGNETOZ = 0x205
+IMU_ROTATIONZ = 0x206
 
 ############### SHARED VARIABLES (mutex) ##################
 class CMC_ROS:
@@ -88,13 +103,40 @@ class US2_ROS:
         self.frontCentralUltr = 0   #Bytes 4-5 / Central Front Ultrasonic US_AVC
         self.MUT = Lock()
 
+class GPS_ROS:
+    def __init__(self):
+        self.latitude = 0       #bytes 0..3 / Latitude
+        self.longitude = 0      #bytes 4..7 / Longitude
+        self.MUT = Lock()
+
+class IMU_ROS:
+    def __init__(self):
+        self.x_acceleration = 0      #id 202 / bytes 0..3 / x linear velocity
+        self.y_acceleration = 0      #id 202 / bytes 4..7 / y linear velocity
+        self.z_acceleration = 0      #id 205 / bytes 0..3 / z linear velocity
+
+        self.x_rotation = 0      #id 204 / bytes 0..3 / x rotation
+        self.y_rotation = 0      #id 204 / bytes 4..7 / y rotation
+        self.z_rotation = 0      #id 206 / bytes 0..3 / z rotation
+
+        self.x_magneto = 0      #id 203 / bytes 0..3 / x magnetic field
+        self.y_magneto = 0      #id 203 / bytes 4..7 / y magnetic field
+        self.z_magneto = 0      #id 205 / bytes 4..7 / z magnetic field
+        self.MUT = Lock()
+
 MOTOR_COMMANDS = CMC_ROS()
 MOTOR_SENSORS = MS_ROS()
 ULTRASONIC_SENSORS1 = US1_ROS()
 ULTRASONIC_SENSORS2 = US2_ROS()
+GPS = GPS_ROS()
+IMU = IMU_ROS()
 
 ###########################################################
-
+def twos_complement(hexstr,bits):
+    value = int(hexstr,16)
+    if value & (1<< (bits-1)):
+        value -= 1 << bits
+    return value
 
 class MyReceive(Thread):
     def __init__(self, bus):
@@ -153,14 +195,14 @@ class MyReceive(Thread):
                 global MOTOR_SENSORS
                 MOTOR_SENSORS.MUT.acquire()
                 MOTOR_SENSORS.steering_center = MOTOR_SENSORS.steering_angle
-                print("center update")
+                #print("center update")
                 if  (MOTOR_SENSORS.steering_center != 0):              
                     MOTOR_COMMANDS.MUT.acquire()            
                     MOTOR_COMMANDS.steering_enabled = 1
                     MOTOR_COMMANDS.MUT.release()
                 MOTOR_SENSORS.MUT.release()
             
-            print("speed_pwm: ",(50 + self.speed_cmd),"steering_pwm: ", (50 + self.steering_cmd) )
+            #print("speed_pwm: ",(50 + self.speed_cmd),"steering_pwm: ", (50 + self.steering_cmd) )
 
             msg = can.Message(arbitration_id=CMC,data=[pwm_motor_L, pwm_motor_R, pwm_steering,0,0,0,0,0],extended_id=False)
 
@@ -190,6 +232,17 @@ class MySend(Thread):
         self.rearLeftUltr= 0.0
         self.rearRightUltr = 0.0
         self.frontCentralUltr = 0.0
+        self.latitude = 0.0
+        self.longitude = 0.0
+        self.x_acceleration = 0.0
+        self.y_acceleration = 0.0
+        self.z_acceleration = 0.0
+        self.x_rotation = 0.0
+        self.y_rotation = 0.0
+        self.z_rotation = 0.0
+        self.x_magneto = 0.0
+        self.y_magneto = 0.0
+        self.z_magneto = 0.0
         
 
     def run(self):
@@ -209,16 +262,18 @@ class MySend(Thread):
                 if (self.steering_center == 0):
                     self.steering_angle = (int(codecs.encode(msg.data[0:2],'hex'), 16))
                 else:
-                    self.steering_angle = (int(codecs.encode(msg.data[0:2],'hex'), 16)-self.steering_center)/19.45
+                    self.steering_angle = (int(codecs.encode(msg.data[0:2],'hex'), 16)-(self.steering_center+60))/19.45
+                    #print(self.steering_angle)
                 # Battery level
                 self.batt_level = ((int(codecs.encode(msg.data[2:4],'hex'), 16)*(3.3/0.20408))/4095)
                 # Left wheel speed
                 self.motor_speed_L = int(codecs.encode(msg.data[4:6],'hex'), 16)*0.01
+                print(self.motor_speed_L)
                 # Right wheel speed
                 # header : SWR payload : integer, *0.01rpm
                 self.motor_speed_R= int(codecs.encode(msg.data[6:8],'hex'), 16)*0.01
                 
-                print("steering_angle: ",self.steering_angle,"; batt_level: ",self.batt_level,"; left_speed: ",self.motor_speed_L,"; right_speed: ",self.motor_speed_R)
+                #print("steering_angle: ",self.steering_angle,"; batt_level: ",self.batt_level,"; left_speed: ",self.motor_speed_L,"; right_speed: ",self.motor_speed_R)
                          
             MOTOR_SENSORS.MUT.acquire()
             MOTOR_SENSORS.batt_level = self.batt_level
@@ -231,11 +286,11 @@ class MySend(Thread):
                 # Front left ultrasonic sensor
                 self.frontLeftUltr = int(codecs.encode(msg.data[0:2],'hex'), 16)
                 # Front right ultrasonic sensor
-                self.frontRightUltr =int(codecs.encode(msg.data[2:4],'hex'), 16)
+                self.frontRightUltr = int(codecs.encode(msg.data[2:4],'hex'), 16)
                 # Central rear ultrasonic sensor
                 self.rearCentralUltr = int(codecs.encode(msg.data[4:6],'hex'), 16)
                 
-                print("ULTRASONIC1 --- frontLeftUltr: ",self.frontLeftUltr, " frontRightUltr: ",self.frontRightUltr, " rearCentralUltr: ",self.rearCentralUltr)
+                #print("ULTRASONIC1 --- frontLeftUltr: ",self.frontLeftUltr, " frontRightUltr: ",self.frontRightUltr, " rearCentralUltr: ",self.rearCentralUltr)
 
             global ULTRASONIC_SENSORS1
             ULTRASONIC_SENSORS1.MUT.acquire()
@@ -252,7 +307,7 @@ class MySend(Thread):
                 # Central frontal ultrasonic sensor
                 self.frontCentralUltr = int(codecs.encode(msg.data[4:6],'hex'), 16)
                 
-                print("ULTRASONIC2 --- rearLeftUltr: ",self.rearLeftUltr, " rearRightUltr: ",self.rearRightUltr, " frontCentralUltr: ",self.frontCentralUltr)
+                #print("ULTRASONIC2 --- rearLeftUltr: ",self.rearLeftUltr, " rearRightUltr: ",self.rearRightUltr, " frontCentralUltr: ",self.frontCentralUltr)
             
             global ULTRASONIC_SENSORS2
             ULTRASONIC_SENSORS2.MUT.acquire()
@@ -260,6 +315,75 @@ class MySend(Thread):
             self.rearRightUltr = ULTRASONIC_SENSORS2.rearRightUltr
             self.frontCentralUltr = ULTRASONIC_SENSORS2.frontCentralUltr
             ULTRASONIC_SENSORS2.MUT.release()
+
+            if msg.arbitration_id == GPS_ID:
+                self.latitude = (int(codecs.encode(msg.data[0:4],'hex'), 16))*0.0000001
+                self.longitude = (int(codecs.encode(msg.data[4:8],'hex'), 16))*0.0000001
+                #print("latitude =", self.latitude, "longitude =", self.longitude)
+                
+            global GPS
+            GPS.MUT.acquire()
+            GPS.latitude = self.latitude
+            GPS.longitude = self.longitude
+            GPS.MUT.release()
+
+            #------IMU frames------
+            if msg.arbitration_id == IMU_ACCELXY:
+                # x acceleration, converted from mg to m/s**2
+                self.x_acceleration = twos_complement(codecs.encode(msg.data[0:4],'hex'),32)*0.001*VALG
+                # y acceleration, converted from mg to m/s**2
+                self.y_acceleration = twos_complement(codecs.encode(msg.data[4:8],'hex'),32)*0.001*VALG
+
+            global IMU
+            IMU.MUT.acquire()
+            IMU.x_acceleration = self.x_acceleration
+            IMU.y_acceleration = self.y_acceleration
+            IMU.MUT.release()
+
+            if msg.arbitration_id == IMU_MAGNETOXY:
+                # x magnetic field, converted from milliGauss to Tesla
+                self.x_magneto = (int(codecs.encode(msg.data[0:4],'hex'), 16))*0.0000001
+                # y magnetic field, converted from milliGauss to Tesla
+                self.y_magneto = (int(codecs.encode(msg.data[4:8],'hex'), 16))*0.0000001
+
+            global IMU
+            IMU.MUT.acquire()
+            IMU.x_magneto = self.x_magneto
+            IMU.y_magneto = self.y_magneto
+            IMU.MUT.release()
+
+            if msg.arbitration_id == IMU_ROTATIONXY:
+                # x rotation, converted from mdps to rad/sec
+                self.x_rotation = twos_complement(codecs.encode(msg.data[0:4],'hex'), 32)*0.001*(VALPI/180)
+                # y rotation, converted from mdps to rad/sec
+                self.y_rotation = twos_complement(codecs.encode(msg.data[4:8],'hex'), 32)*0.001*(VALPI/180)
+
+            global IMU
+            IMU.MUT.acquire()
+            IMU.x_rotation = self.x_rotation
+            IMU.y_rotation = self.y_rotation
+            IMU.MUT.release()
+
+            if msg.arbitration_id == IMU_ACCELMAGNETOZ:
+                # z acceleration, converted from mg to m/s**2
+                self.z_acceleration = twos_complement(codecs.encode(msg.data[0:4],'hex'), 32)*0.001*VALG
+                # z magnetic field, converted from milliGauss to Tesla
+                self.z_magneto = (int(codecs.encode(msg.data[4:8],'hex'), 16))*0.0000001
+                
+            global IMU
+            IMU.MUT.acquire()
+            IMU.z_acceleration = self.z_acceleration
+            IMU.z_magneto = self.z_magneto
+            IMU.MUT.release()
+
+            if msg.arbitration_id == IMU_ROTATIONZ:
+                # z rotation, converted from mdps to rad/sec
+                self.z_rotation = twos_complement(codecs.encode(msg.data[0:4],'hex'), 16)*0.001*(VALPI/180)
+
+            global IMU
+            IMU.MUT.acquire()
+            IMU.z_rotation = self.z_rotation
+            IMU.MUT.release()
     
 #Converts RPM to the PWM corresponding value
 #For the forward mode:
@@ -384,7 +508,7 @@ def steering_PID(refAngle):
     angle = MOTOR_SENSORS.steering_angle  # angle given by the sensor (in degrees)
     MOTOR_SENSORS.MUT.release()
     angleError =refAngle-angle
-    print(angleError)
+    #print(angleError)
     global sum_angleError
     sum_angleError = sum_angleError + angleError # Integral error
     
@@ -396,17 +520,17 @@ def steering_PID(refAngle):
     #else:
     #    cmdAngle = int(Angle_to_PWM(cmdAngle_degre))
     
-    print('cmdAngle',cmdAngle)
+    #print('cmdAngle',cmdAngle)
     
     return cmdAngle 
 
 
 def callback_motor_cmd(data):
     #rospy.loginfo(rospy.get_caller_id() + 'I heard %d', data.linear.x)
-    print('I heard %d', data.linear.x)
+    #print('I heard %d', data.linear.x)
     global MOTOR_COMMANDS
     MOTOR_COMMANDS.MUT.acquire()
-    print("ENABLE VALUE IS = ", MOTOR_COMMANDS.drive_enabled)
+    #print("ENABLE VALUE IS = ", MOTOR_COMMANDS.drive_enabled)
     if(MOTOR_COMMANDS.drive_enabled == 1):
         MOTOR_COMMANDS.speed_cmd = int(data.linear.x)
         if (data.angular.z<(-25)):
@@ -506,6 +630,10 @@ class MyTalker(Thread):
         pub = rospy.Publisher('/motor_sensors', Float32MultiArray, queue_size=10)
         pubUltr1 = rospy.Publisher('/ultrasonic_sensors1', Float32MultiArray, queue_size=10)
         pubUltr2 = rospy.Publisher('/ultrasonic_sensors2', Float32MultiArray, queue_size=10)
+        pubGPS = rospy.Publisher('/GPS_coordinates', NavSatFix, queue_size=10)
+        pubIMUraw = rospy.Publisher('imu/data_raw', Imu, queue_size=10)
+        pubIMUmagn = rospy.Publisher('imu/mag', MagneticField, queue_size=10)
+
         #rospy.init_node('talker', anonymous=True)
         rate = rospy.Rate(10) # 10hz
         vect = Float32MultiArray()
@@ -529,8 +657,48 @@ class MyTalker(Thread):
         vectU2.layout.dim[0].label = "height"
         vectU2.layout.dim[0].size = 3
         vectU2.layout.dim[0].stride = 3
-        
-        while not rospy.is_shutdown():            
+
+        #GPS publisher
+        rateGPS = rospy.Rate(10)
+        vectGPS = NavSatFix()
+        vectGPS.header.frame_id = "base_link"
+        vectGPS.status.status = 1
+        vectGPS.status.service = 1
+        vectGPS.altitude = 0.0
+        vectGPS.position_covariance[0] = 1.0
+        vectGPS.position_covariance[4] = 1.0
+        vectGPS.position_covariance[8] = 1.0
+        vectGPS.position_covariance_type = 0 #0=Unknown
+
+        #IMU raw data publisher
+        rateIMUraw = rospy.Rate(10)
+        vectIMUraw = Imu()
+        vectIMUraw.header.frame_id = "imu_link"
+        vectIMUraw.orientation.x = 0.0
+        vectIMUraw.orientation.y = 0.0
+        vectIMUraw.orientation.z = 0.0
+        vectIMUraw.orientation.w = 0.0
+        vectIMUraw.orientation_covariance[0] = 0.0
+        vectIMUraw.orientation_covariance[4] = 0.0
+        vectIMUraw.orientation_covariance[8] = 0.0
+        vectIMUraw.angular_velocity_covariance[0] = (3.40)*(10**(-6))
+        vectIMUraw.angular_velocity_covariance[4] = (7.96)*(10**(-7))
+        vectIMUraw.angular_velocity_covariance[8] = (1.69)*(10**(-5))
+        vectIMUraw.linear_acceleration_covariance[0] = (4.63)*(10**(-4))
+        vectIMUraw.linear_acceleration_covariance[4] = (8.79)*(10**(-4))
+        vectIMUraw.linear_acceleration_covariance[8] = (2.56)*(10**(-4))
+
+        #IMU magnetic field publisher
+        rateIMUmagn = rospy.Rate(10)
+        vectIMUmagn = MagneticField()
+        vectIMUmagn.header.frame_id = "imu_link"
+        vectIMUmagn.magnetic_field_covariance[0] = 0.0
+        vectIMUmagn.magnetic_field_covariance[4] = 0.0
+        vectIMUmagn.magnetic_field_covariance[8] = 0.0
+
+
+        while not rospy.is_shutdown():       
+            current_time = rospy.Time.now()     
             MOTOR_SENSORS.MUT.acquire()
             vect.data = [MOTOR_SENSORS.steering_angle, MOTOR_SENSORS.batt_level, MOTOR_SENSORS.motor_speed_L, MOTOR_SENSORS.motor_speed_R]    
             MOTOR_SENSORS.MUT.release()
@@ -548,6 +716,36 @@ class MyTalker(Thread):
             ULTRASONIC_SENSORS2.MUT.release()
             pubUltr2.publish(vectU2)
             rateU2.sleep()
+
+            GPS.MUT.acquire()
+            vectGPS.latitude = GPS.latitude
+            vectGPS.longitude = GPS.longitude
+            GPS.MUT.release()
+            pubGPS.publish(vectGPS)
+            rateGPS.sleep()
+
+            IMU.MUT.acquire()
+            vectIMUraw.header.stamp = current_time
+            vectIMUraw.angular_velocity.x = IMU.x_rotation
+            vectIMUraw.angular_velocity.y = IMU.y_rotation
+            vectIMUraw.angular_velocity.z = IMU.z_rotation
+            vectIMUraw.linear_acceleration.x = IMU.x_acceleration
+            vectIMUraw.linear_acceleration.y = IMU.y_acceleration
+            vectIMUraw.linear_acceleration.z = IMU.z_acceleration
+            IMU.MUT.release()
+            pubIMUraw.publish(vectIMUraw)
+            rateIMUraw.sleep()
+
+            IMU.MUT.acquire()
+            vectIMUmagn.header.stamp = current_time
+            vectIMUmagn.magnetic_field.x = IMU.x_magneto
+            vectIMUmagn.magnetic_field.y = IMU.y_magneto
+            vectIMUmagn.magnetic_field.z = IMU.z_magneto
+            IMU.MUT.release()
+            pubIMUmagn.publish(vectIMUmagn)
+            rateIMUmagn.sleep()
+
+
             
 
 if __name__ == '__main__':

@@ -533,7 +533,7 @@ def callback_motor_cmd(data):
     global MOTOR_COMMANDS
     MOTOR_COMMANDS.MUT.acquire()
     #print("ENABLE VALUE IS = ", MOTOR_COMMANDS.drive_enabled)
-    if(MOTOR_COMMANDS.drive_enabled == 1 and MOTOR_COMMANDS.hmi_cmd_enabled = 1):
+    if(MOTOR_COMMANDS.drive_enabled == 1 and MOTOR_COMMANDS.hmi_cmd_enabled == 1):
         MOTOR_COMMANDS.speed_cmd = int(data.linear.x)
         if (data.angular.z<(-25)):
             MOTOR_COMMANDS.steering_cmd = -25
@@ -574,13 +574,13 @@ def callback_navigation_status(data):
     
     global MOTOR_COMMANDS
 
-    if(data.data = 1): #Autonomous drive is running
+    if(data.data == 1): #Autonomous drive is running
         MOTOR_COMMANDS.MUT.acquire()
         MOTOR_COMMANDS.hmi_cmd_enabled = 0
         MOTOR_COMMANDS.MUT.release()
         print('HMI COMMANDS ARE NOT ALLOWED BECAUSE OF AUTONOMOUS NAVIGATION\n')
 
-    elif(data.data = 0): #Autonomous drive is not running
+    elif(data.data == 0): #Autonomous drive is not running
         MOTOR_COMMANDS.MUT.acquire()
         MOTOR_COMMANDS.hmi_cmd_enabled = 1
         MOTOR_COMMANDS.MUT.release()

@@ -35,6 +35,7 @@
 import rospy
 
 from std_msgs.msg import UInt8
+from std_msgs.msg import Int16
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist 
 from std_msgs.msg import Float32MultiArray
@@ -78,6 +79,7 @@ class CMC_ROS:
         self.steering_cmd = 0
         self.steering_enabled = 0
         self.drive_enabled = 1
+        self.hmi_cmd_enabled = 1
         self.MUT = Lock()
 
 class MS_ROS:
@@ -531,7 +533,7 @@ def callback_motor_cmd(data):
     global MOTOR_COMMANDS
     MOTOR_COMMANDS.MUT.acquire()
     #print("ENABLE VALUE IS = ", MOTOR_COMMANDS.drive_enabled)
-    if(MOTOR_COMMANDS.drive_enabled == 1):
+    if(MOTOR_COMMANDS.drive_enabled == 1 and MOTOR_COMMANDS.hmi_cmd_enabled = 1):
         MOTOR_COMMANDS.speed_cmd = int(data.linear.x)
         if (data.angular.z<(-25)):
             MOTOR_COMMANDS.steering_cmd = -25
@@ -539,9 +541,49 @@ def callback_motor_cmd(data):
             MOTOR_COMMANDS.steering_cmd = 25
         MOTOR_COMMANDS.steering_cmd = int(data.angular.z)
     else:
+        print('DRIVING IS NOT ALLOWED BECAUSE OF OBJECT DETECTION OR AUTONOMOUS NAVIGATION\n')
+        
+    MOTOR_COMMANDS.MUT.release()
+
+def callback_navigation_cmd(data):
+    #rospy.loginfo(rospy.get_caller_id() + 'I heard %d', data.linear.x)
+    #print('I heard %d', data.linear.x)
+    
+    car_cmd_twist = Twist()
+    car_cmd_twist.linear.x = 10 * data.linear.x             #We map from [-5;5] to [-5;5]
+    car_cmd_twist.angular.z = (data.angular.z/3.1415) * 25  #We map from [-pi;pi] in rad to [-25;25] in degrees
+    
+    global MOTOR_COMMANDS
+    MOTOR_COMMANDS.MUT.acquire()
+    #print("ENABLE VALUE IS = ", MOTOR_COMMANDS.drive_enabled)
+    if(MOTOR_COMMANDS.drive_enabled == 1):
+        MOTOR_COMMANDS.speed_cmd = int(car_cmd_twist.linear.x)
+        if (data.angular.z<(-25)):
+            MOTOR_COMMANDS.steering_cmd = -25
+        elif (data.angular.z>(25)):
+            MOTOR_COMMANDS.steering_cmd = 25
+        MOTOR_COMMANDS.steering_cmd = int(car_cmd_twist.angular.z)
+    else:
         print('DRIVING IS NOT ALLOWED BECAUSE OF OBJECT DETECTION')
         
     MOTOR_COMMANDS.MUT.release()
+
+def callback_navigation_status(data):
+    #rospy.loginfo(rospy.get_caller_id() + 'I heard %d', data.data)
+    #print('I heard %d', data.data)
+    
+    global MOTOR_COMMANDS
+
+    if(data.data = 1): #Autonomous drive is running
+        MOTOR_COMMANDS.MUT.acquire()
+        MOTOR_COMMANDS.hmi_cmd_enabled = 0
+        MOTOR_COMMANDS.MUT.release()
+        print('HMI COMMANDS ARE NOT ALLOWED BECAUSE OF AUTONOMOUS NAVIGATION\n')
+
+    elif(data.data = 0): #Autonomous drive is not running
+        MOTOR_COMMANDS.MUT.acquire()
+        MOTOR_COMMANDS.hmi_cmd_enabled = 1
+        MOTOR_COMMANDS.MUT.release()
 
 #function that return the object name regarding the ROS number that was read on the ROS topic
 def ROS_number_to_Detection(class_number):
@@ -617,6 +659,8 @@ def listener():
     # run simultaneously.
     rospy.init_node('listener', anonymous=True)
     rospy.Subscriber('/speed_cmd', Twist, callback_motor_cmd)
+    rospy.Subscriber('/cmd_vel', Twist, callback_navigation_cmd)
+    rospy.Subscriber('/hmi_wp_status', Int16, callback_navigation_status)
     rospy.Subscriber('/detection', UInt8, callback_detection)
 
 
